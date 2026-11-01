@@ -32,6 +32,7 @@ async function loadPdf(data, name) {
   pdfDoc = await task.promise;
   viewer.setDocument(pdfDoc);
   linkService.setDocument(pdfDoc, null);
+  $("emptyState").classList.add("hidden");
   document.title = pdfName;
   $("numPages").textContent = `of ${pdfDoc.numPages}`;
   $("pageNumber").max = pdfDoc.numPages;
@@ -263,7 +264,19 @@ function switchTab(t) {
   $("viewOutline").classList.toggle("active", t === "outline");
 }
 $("openFile").onclick = () => $("fileInput").click();
-$("fileInput").onchange = async (e) => { const f = e.target.files[0]; if (f) loadPdf(await f.arrayBuffer(), f.name); };
+$("openPdf").onclick = () => {
+  $("emptyBack").classList.toggle("hidden", !pdfDoc);
+  $("emptyState").classList.remove("hidden");
+};
+$("emptyBack").onclick = () => $("emptyState").classList.add("hidden");
+document.addEventListener("keydown", (e) => {
+  if (e.key === "Escape" && pdfDoc) $("emptyState").classList.add("hidden");
+});
+$("fileInput").onchange = async (e) => {
+  const f = e.target.files[0];
+  e.target.value = "";
+  if (f) await loadPdf(await f.arrayBuffer(), f.name);
+};
 $("presentation").onclick = () => container.requestFullscreen?.();
 // saveDocument inclui as anotações criadas no editor
 async function currentBytes() {
@@ -313,6 +326,54 @@ function buildPalette(mode) {
 function setEditorMode(mode) {
   viewer.annotationEditorMode = { mode };
 }
+// The margin covers the resize handles
+function stampAt(event, margin = 10) {
+  return [...document.querySelectorAll(".stampEditor")].find((el) => {
+    const rect = el.getBoundingClientRect();
+    return event.clientX >= rect.left - margin && event.clientX <= rect.right + margin &&
+      event.clientY >= rect.top - margin && event.clientY <= rect.bottom + margin;
+  });
+}
+function selectStamp(el) {
+  const editor = uiManager?.getEditor(el.id);
+  if (editor && !uiManager.isSelected(editor)) uiManager.setSelected(editor);
+}
+// Hovering an image enables editing and selects it, so it can be dragged right away
+container.addEventListener("pointermove", (event) => {
+  if (event.buttons || (curMode !== ET.NONE && curMode !== ET.STAMP)) return;
+  const el = stampAt(event);
+  if (!el) return;
+  if (curMode === ET.NONE) {
+    setEditorMode(ET.STAMP);
+    setTimeout(() => selectStamp(el), 50);
+  } else selectStamp(el);
+});
+// Clicking outside the image leaves its editing
+container.addEventListener("pointerdown", (event) => {
+  if (curMode === ET.STAMP && !stampAt(event)) setEditorMode(ET.NONE);
+}, true);
+function refreshStampCanvases() {
+  for (const canvas of document.querySelectorAll(".page canvas")) {
+    const display = canvas.style.display;
+    canvas.style.display = "none";
+    void canvas.offsetHeight;
+    canvas.style.display = display;
+  }
+}
+function refreshStampCanvasesAfterFileDialog() {
+  refreshStampCanvases();
+  for (const delay of [150, 500, 1000]) setTimeout(refreshStampCanvases, delay);
+}
+window.addEventListener("focus", refreshStampCanvasesAfterFileDialog);
+new MutationObserver((mutations) => {
+  const hasStampChange = mutations.some((mutation) => {
+    if (mutation.target instanceof Element && mutation.target.closest(".stampEditor")) return true;
+    return [...mutation.addedNodes].some((node) =>
+      node instanceof Element && (node.matches(".stampEditor") || node.querySelector(".stampEditor")),
+    );
+  });
+  if (hasStampChange) refreshStampCanvases();
+}).observe(container, { childList: true, subtree: true });
 const imageInput = document.createElement("input");
 imageInput.type = "file";
 imageInput.accept = "image/png,image/jpeg,image/gif,image/webp,image/svg+xml";
@@ -320,27 +381,25 @@ imageInput.onchange = () => {
   const file = imageInput.files[0];
   imageInput.value = "";
   const layer = uiManager?.currentLayer;
-  if (file && layer) layer.pasteEditor(ET.STAMP, { bitmapFile: file });
-  setEditorMode(ET.NONE);
+  if (!file || !layer) return;
+  setEditorMode(ET.STAMP);
+  layer.pasteEditor(ET.STAMP, { bitmapFile: file });
+  refreshStampCanvasesAfterFileDialog();
 };
-imageInput.oncancel = () => setEditorMode(ET.NONE);
 for (const [id, mode] of Object.entries(modes)) {
   $(id).onclick = () => {
+    if (mode === ET.STAMP) { imageInput.click(); return; }
     const off = $(id).classList.contains("active");
-    if (mode === ET.STAMP) {
-      setEditorMode(ET.STAMP);
-      if (!off) imageInput.click();
-      return;
-    }
     setEditorMode(off ? ET.NONE : mode);
   };
 }
 eventBus.on("annotationeditormodechanged", ({ mode }) => {
   curMode = mode;
-  for (const [id, m] of Object.entries(modes)) $(id).classList.toggle("active", m === mode);
-  document.body.classList.toggle("editing", mode !== ET.NONE);
-  $("editParams").classList.toggle("hidden", mode === ET.NONE || mode === ET.STAMP);
-  $("edSizeLabel").classList.toggle("hidden", mode === ET.HIGHLIGHT);
+  if (mode === ET.NONE) refreshStampCanvases();
+  for (const [id, m] of Object.entries(modes)) $(id).classList.  toggle("active", m === mode && m !== ET.STAMP);
+    document.body.classList.toggle("editing", mode !== ET.NONE);
+    $("editParams").classList.toggle("hidden", mode === ET.NONE || mode === ET.STAMP);
+    $("edSizeLabel").classList.toggle("hidden", mode === ET.HIGHLIGHT);
   if (mode === ET.HIGHLIGHT || mode === ET.FREETEXT || mode === ET.INK) buildPalette(mode);
   setTimeout(() => {
     if (curMode !== mode) return;
@@ -370,18 +429,46 @@ $("invertPages").onclick = () => {
 const menu = $("moreMenu");
 // Split view: a second, independent viewer in an iframe next to this one
 const embedded = new URLSearchParams(location.search).has("embedded");
-if (embedded) $("splitToggle").remove();
+if (embedded) {
+  document.body.classList.add("split-active");
+  $("splitClose").onclick = () => window.parent.postMessage("close-split-view", "*");
+  $("splitToggle").onclick = () => window.parent.postMessage("restore-split", "*");
+  window.addEventListener("message", (e) => {
+    if (e.source === window.parent) document.body.classList.toggle("solo", e.data === "solo");
+  });
+}
 else {
   let pane = null;
+  const tell = (msg) => pane?.querySelector("iframe").contentWindow.postMessage(msg, "*");
+  const closeSplit = () => {
+    pane?.remove();
+    pane = null;
+    document.body.classList.remove("split-active", "split-promoted");
+    $("mainContainer").classList.remove("hidden");
+  };
   $("splitToggle").onclick = () => {
-    if (pane) { pane.remove(); pane = null; $("splitToggle").classList.remove("active"); return; }
+    if (pane) return;
     pane = document.createElement("div");
     pane.id = "splitPane";
-    pane.innerHTML = '<button id="splitClose" title="Close split view">✕</button><iframe src="index.html?embedded=1" title="Second PDF"></iframe>';
-    pane.querySelector("#splitClose").onclick = $("splitToggle").onclick;
+    pane.innerHTML = '<iframe src="index.html?embedded=1" title="Second PDF"></iframe>';
     document.body.append(pane);
-    $("splitToggle").classList.add("active");
+    document.body.classList.add("split-active");
   };
+  $("splitClose").onclick = () => {
+    if (!pane) return;
+    $("mainContainer").classList.add("hidden");
+    document.body.classList.add("split-promoted");
+    tell("solo");
+  };
+  window.addEventListener("message", (e) => {
+    if (!pane || e.source !== pane.querySelector("iframe").contentWindow) return;
+    if (e.data === "close-split-view") closeSplit();
+    else if (e.data === "restore-split") {
+      $("mainContainer").classList.remove("hidden");
+      document.body.classList.remove("split-promoted");
+      tell("split");
+    }
+  });
 }
 new ResizeObserver(() => {
   if (!pdfDoc) return;
@@ -393,6 +480,7 @@ menu.addEventListener("click", () => menu.classList.add("hidden"));
 document.addEventListener("click", (e) => { if (!menu.contains(e.target)) menu.classList.add("hidden"); });
 
 eventBus.on("pagechanging", (e) => {
+  if (!pdfDoc) return;
   $("pageNumber").value = e.pageNumber;
   $("prev").disabled = e.pageNumber <= 1;
   $("next").disabled = e.pageNumber >= pdfDoc.numPages;
@@ -520,6 +608,5 @@ if (src) {
     .catch(() => {});
 }
 $("emptyOpen").onclick = () => $("fileInput").click();
-eventBus.on("pagesinit", () => $("emptyState").classList.add("hidden"));
 
 })();
