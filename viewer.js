@@ -381,25 +381,32 @@ imageInput.onchange = () => {
   const file = imageInput.files[0];
   imageInput.value = "";
   const layer = uiManager?.currentLayer;
-  if (!file || !layer) return;
-  setEditorMode(ET.STAMP);
-  layer.pasteEditor(ET.STAMP, { bitmapFile: file });
-  refreshStampCanvasesAfterFileDialog();
+  if (file && layer) {
+    setEditorMode(ET.STAMP);
+    layer.pasteEditor(ET.STAMP, { bitmapFile: file });
+    refreshStampCanvasesAfterFileDialog();
+  }
+  setEditorMode(ET.NONE);
 };
+imageInput.oncancel = () => setEditorMode(ET.NONE);
 for (const [id, mode] of Object.entries(modes)) {
   $(id).onclick = () => {
-    if (mode === ET.STAMP) { imageInput.click(); return; }
     const off = $(id).classList.contains("active");
+    if (mode === ET.STAMP) {
+      setEditorMode(ET.STAMP);
+      if (!off) imageInput.click();
+      return;
+    }
     setEditorMode(off ? ET.NONE : mode);
   };
 }
 eventBus.on("annotationeditormodechanged", ({ mode }) => {
   curMode = mode;
   if (mode === ET.NONE) refreshStampCanvases();
-  for (const [id, m] of Object.entries(modes)) $(id).classList.  toggle("active", m === mode && m !== ET.STAMP);
-    document.body.classList.toggle("editing", mode !== ET.NONE);
-    $("editParams").classList.toggle("hidden", mode === ET.NONE || mode === ET.STAMP);
-    $("edSizeLabel").classList.toggle("hidden", mode === ET.HIGHLIGHT);
+  for (const [id, m] of Object.entries(modes)) $(id).classList.toggle("active", m === mode);
+  document.body.classList.toggle("editing", mode !== ET.NONE);
+  $("editParams").classList.toggle("hidden", mode === ET.NONE || mode === ET.STAMP);
+  $("edSizeLabel").classList.toggle("hidden", mode === ET.HIGHLIGHT);
   if (mode === ET.HIGHLIGHT || mode === ET.FREETEXT || mode === ET.INK) buildPalette(mode);
   setTimeout(() => {
     if (curMode !== mode) return;
@@ -608,5 +615,6 @@ if (src) {
     .catch(() => {});
 }
 $("emptyOpen").onclick = () => $("fileInput").click();
+eventBus.on("pagesinit", () => $("emptyState").classList.add("hidden"));
 
 })();
